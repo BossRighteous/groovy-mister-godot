@@ -1,0 +1,53 @@
+[gd_scene load_steps=4 format=3 uid="uid://cewlgnc8ot6ct"]
+
+[ext_resource type="Script" path="res://scene.gd" id="1_v2j33"]
+[ext_resource type="Texture2D" uid="uid://dxbf8udn3gclg" path="res://icon.svg" id="2_hvro0"]
+
+[sub_resource type="ParticleProcessMaterial" id="ParticleProcessMaterial_dxag8"]
+particle_flag_disable_z = true
+emission_shape = 3
+emission_box_extents = Vector3(128, 1, 1)
+angle_max = 360.0
+direction = Vector3(0, 0, 0)
+spread = 0.0
+initial_velocity_min = 1.0
+initial_velocity_max = 1.0
+angular_velocity_min = 64.72
+angular_velocity_max = 388.31
+gravity = Vector3(0, 200, 0)
+scale_min = 0.2
+scale_max = 0.4
+
+[node name="Scene" type="Node"]
+script = ExtResource("1_v2j33")
+
+[node name="Node2D" type="Node2D" parent="."]
+
+[node name="GPUParticles2D" type="GPUParticles2D" parent="Node2D"]
+position = Vector2(128, -40)
+amount = 25
+process_material = SubResource("ParticleProcessMaterial_dxag8")
+texture = ExtResource("2_hvro0")
+lifetime = 2.0
+fixed_fps = 60
+
+[node name="Control" type="Control" parent="."]
+layout_mode = 3
+anchors_preset = 10
+anchor_right = 1.0
+grow_horizontal = 2
+size_flags_horizontal = 3
+size_flags_vertical = 3
+
+[node name="PanelContainer" type="PanelContainer" parent="Control"]
+layout_mode = 1
+anchors_preset = 10
+anchor_right = 1.0
+offset_bottom = 23.0
+grow_horizontal = 2
+
+[node name="Label" type="Label" parent="Control/PanelContainer"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Frames 0000000000 "
+horizontal_alignment = 2
