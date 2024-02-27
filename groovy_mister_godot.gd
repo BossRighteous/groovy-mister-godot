@@ -13,12 +13,8 @@ var socket: PacketPeerUDP
 
 var v_image: Image
 
-# Set up thread for image and blit processing in parallel
-var mutex: Mutex
-var thread: Thread
-var semaphore: Semaphore
-var exit_thread := false
-var is_thread_running := false
+var frame_buffers: Array[PackedByteArray] = []
+var is_syncing := false
 
 var frame: int = 0
 
@@ -35,26 +31,40 @@ func _ready():
 		call_deferred("initialize")
 
 func initialize():
-	_initialize_thread()
 	_initialize_socket()
-
-func _initialize_thread():
-		mutex = Mutex.new()
-		semaphore = Semaphore.new()
-		exit_thread = false
-		thread = Thread.new()
-		thread.start(_thread_handler)
 	
-# Called every frame. 'delta' is the elapsed time since the previous frame.
 func _physics_process(_delta):
 	if Input.is_action_just_released("ui_accept"):
 		exit()
 	if socket_is_connected:
-		call_deferred("_get_vimage")
+		#call_deferred("_deferred_sync")
+		if is_syncing:
+			print("skipping frame, called while processing")
+			return
+		call_deferred("_send_blit")
+		call_deferred("_get_frame_buffer")
 
-func _get_vimage():
-	v_image = sub_viewport.get_texture().get_image()
-	semaphore.post()
+func _deferred_sync():
+	if is_syncing:
+		print("skipping frame, called while processing")
+		return
+	
+	var sync_time = Time.get_ticks_usec()
+	is_syncing = true
+	_send_blit()
+	_get_frame_buffer()
+	is_syncing = false
+	var total_sync_time = Time.get_ticks_usec()-sync_time
+	if total_sync_time > 16000:
+		print(str(total_sync_time)+" high total sync time")
+
+func _get_frame_buffer():
+	#var frame_buffer_time = Time.get_ticks_usec()
+	var image = sub_viewport.get_texture().get_image()
+	image.convert(Image.FORMAT_RGB8)
+	frame_buffers.push_back(image.get_data())
+	#print(str(Time.get_ticks_usec()-frame_buffer_time)+" frame buffer time")
+	is_syncing = false
 
 func _initialize_socket():
 	socket = PacketPeerUDP.new()
@@ -113,10 +123,8 @@ func cmd_switchres():
 	_socket_send(buffer)
 	print("cmd_switchres ran")
 
-func _thread_cmd_blit(frame_buffer: PackedByteArray):
-	mutex.unlock()
+func _cmd_blit(frame_buffer: PackedByteArray):
 	frame = frame + 1
-	mutex.lock()
 	var buffer = PackedByteArray()
 	buffer.resize(9)
 	buffer.set(0, CMD_BLIT_VSYNC)
@@ -125,14 +133,13 @@ func _thread_cmd_blit(frame_buffer: PackedByteArray):
 	buffer.set(7, 0) # lz4: blockSize & 0xff
 	buffer.set(8, 0) # lz4: blockSize >> 8
 	_socket_send(buffer)
-	print("cmd_blit_vsync ran")
+	#print("cmd_blit_vsync ran")
 	_send_mtu(frame_buffer)
-	print("cmd_blit ran")
+	#print("cmd_blit ran")
 
 func _send_mtu(frame_buffer: PackedByteArray):
 	var bytes_to_send = frame_buffer.size()
 	var chunk_max_size = MTU_BLOCK_SIZE
-	#var bytes_this_chunk: int = 0
 	var chunk_size: int = 0
 	var offset: int = 0
 	while bytes_to_send > 0:
@@ -146,59 +153,32 @@ func _socket_send(buffer: PackedByteArray, byte_length: int = 0):
 		byte_length = buffer.size()
 	if DEBUG_NO_SEND:
 		return
-	call_deferred("_put_deferred",buffer)
-	#socket.put_packet(buffer)
+	#call_deferred("_put_deferred",buffer)
+	socket.put_packet(buffer)
 	
 
 func _put_deferred(buffer:PackedByteArray):
 	socket.put_packet(buffer)
 
-# This is basically a parallel blit routine
-func _thread_handler():
-	while true:
-		var image = Image.new()
-		
-		semaphore.wait() # Wait until posted.
-		var thread_time = Time.get_ticks_usec()
-		mutex.lock()
-		var should_exit = exit_thread
-		if !v_image:
-			print("no v_image, continuing")
-			continue
-		image.copy_from(v_image)
-		mutex.unlock()
-		image.convert(Image.FORMAT_RGB8)
-		var data = image.get_data()
-		#for px0 in range(0, data.size(), 3):
-			#var red = data[px0]
-			#data.set(px0, data[px0+2])
-			#data.set(px0+2, red)
-
-		# Ideas: do use a frame buffer, send at start of thread from buffer
-		# Batch writes/swaps to minimize looping itself, ie 5px at a time or whatever
-		# GPU shader for channel swap to eliminate looping, just need copy and get_data
-		# send saved last-frame buffer from main thread physics event
-		
-		_thread_cmd_blit(data)
-		print(str(Time.get_ticks_usec()-thread_time)+" thread time")
-		if should_exit:
-			print("exiting thread")
-			break
+func _send_blit():
+		#var blit_time_no_thread = Time.get_ticks_usec()
+		var data: PackedByteArray
+		if frame_buffers.size() < 1:
+			return
+		if frame_buffers.size() > 1:
+			#print(frame_buffers.size())
+			data = frame_buffers[frame_buffers.size()-1]
+			frame_buffers.clear()
+			frame_buffers.push_front(data)
+		else:
+			data = frame_buffers[0]
+		_cmd_blit(data)
+		#print(str(Time.get_ticks_usec()-blit_time_no_thread)+" blit_time_no_thread time")
 
 func _exit_tree():
 	exit()
 
-func exit():
-	# Set exit condition to true.
-	mutex.lock()
-	exit_thread = true # Protect with Mutex.
-	mutex.unlock()
-	# Unblock by posting.
-	semaphore.post()
-
-	# Wait until it exits.
-	thread.wait_to_finish()
-	
+func exit():	
 	if socket and socket.is_socket_connected():
 		cmd_close()
 		socket.close()
