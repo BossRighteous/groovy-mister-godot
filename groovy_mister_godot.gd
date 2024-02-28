@@ -32,17 +32,15 @@ var mutex: Mutex
 var semaphore: Semaphore
 var thread: Thread
 var exit_thread := false
-#var delay_timer := Timer.new()
+var delay_timer := Timer.new()
 
 func _ready():
-	#add_child(delay_timer)
+	add_child(delay_timer)
 	if initialize_on_ready:
 		call_deferred("initialize")
 
 func initialize():
 	_initialize_socket()
-	if DEBUG_BLIT_VIA_THREAD:
-		call_deferred("start_blit_thread")
 	
 func start_blit_thread():
 	mutex = Mutex.new()
@@ -93,20 +91,25 @@ func _initialize_socket():
 	socket = PacketPeerUDP.new()
 	# socket.set_blocking_mode(true)
 	socket.connect_to_host(MiSTer_ip, MiSTer_port)
+	#socketAck.bind(MiSTer_port)
 	if socket.is_socket_connected:
 		print("socket initialized")
 		#delay_timer.start(.5)
 		#await delay_timer.timeout
 		cmd_init()
+		delay_timer.start(.5)
+		await delay_timer.timeout
 		#delay_timer.start(.5)
 		#await delay_timer.timeout
 		cmd_switchres()
-		#delay_timer.start(.5)
-		#await delay_timer.timeout
+		delay_timer.start(.5)
+		await delay_timer.timeout
 		socket_is_connected = true
 	else:
 		print('Error connecting to GroovyMister, removing GroovyMisterGodot')
 		exit()
+	if DEBUG_BLIT_VIA_THREAD:
+		call_deferred("start_blit_thread")
 
 func cmd_close():
 	var buffer = PackedByteArray([CMD_CLOSE])
@@ -208,16 +211,22 @@ func _send_blit():
 		#print(str(Time.get_ticks_usec()-blit_time_no_thread)+" blit_time_no_thread time")
 
 func _blit_thread():
-	var tick_rate_usec: int = floor(1000000.0/(fps*2))
+	var tick_rate_usec: int = floor(1000000.0/(fps))
 	print("tick rate "+str(tick_rate_usec))
 	var next_tick: int = Time.get_ticks_usec() + tick_rate_usec
 	print("next_tick "+str(next_tick))
+	# wait for init ack
+	#while(socket.get_available_packet_count() == 0):
+	#	print("waiting for initial ack")
+	#	pass
+	#print("got init ack")
+	var init_ack = socket.get_packet()
 	while !exit_thread:
 		var curr_time: int = Time.get_ticks_usec()
 		#if curr_time < next_tick or !socket_is_connected:
 		if !socket_is_connected:
 			continue
-		#next_tick = curr_time + tick_rate_usec
+		next_tick = curr_time + tick_rate_usec
 		#print("next_tick "+str(next_tick))
 		
 		#var blit_time_no_thread = Time.get_ticks_usec()
@@ -242,6 +251,11 @@ func _blit_thread():
 		if end_time - curr_time > tick_rate_usec:
 			print("Blit time extended tick by "+str(end_time - curr_time - tick_rate_usec))
 		#print(str(Time.get_ticks_usec()-blit_time_no_thread)+" blit_time_no_thread time")
+		while(socket.get_available_packet_count() == 0):
+			pass
+		while(socket.get_available_packet_count() > 0):
+			var ack = socket.get_packet()
+			print('Got Ack')
 
 func _exit_tree():
 	exit()
@@ -251,7 +265,7 @@ func exit():
 	exit_thread = true
 	if thread.is_started():
 		thread.wait_to_finish()
-	if socket and socket.is_socket_connected():
+	if socket and (socket.is_socket_connected() or socket.is_bound()):
 		cmd_close()
 		socket.close()
 	
