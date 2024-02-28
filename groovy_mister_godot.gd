@@ -1,6 +1,7 @@
 extends Node
 
 var DEBUG_NO_SEND = false
+var DEBUG_BLIT_VIA_THREAD = true
 
 @export var sub_viewport: SubViewport
 @export var initialize_on_ready: bool = true
@@ -15,6 +16,7 @@ var v_image: Image
 
 var frame_buffers: Array[PackedByteArray] = []
 var is_syncing := false
+var fps := 60
 
 var frame: int = 0
 
@@ -24,39 +26,60 @@ const CMD_SWITCHRES = 3
 const CMD_BLIT = 4
 const CMD_GET_STATUS = 5
 const CMD_BLIT_VSYNC = 6
-const MTU_BLOCK_SIZE = 1470
+const MTU_BLOCK_SIZE = 1470 #1470
+
+var mutex: Mutex
+var semaphore: Semaphore
+var thread: Thread
+var exit_thread := false
+#var delay_timer := Timer.new()
 
 func _ready():
+	#add_child(delay_timer)
 	if initialize_on_ready:
 		call_deferred("initialize")
 
 func initialize():
 	_initialize_socket()
+	if DEBUG_BLIT_VIA_THREAD:
+		call_deferred("start_blit_thread")
+	
+func start_blit_thread():
+	mutex = Mutex.new()
+	exit_thread = false
+	thread = Thread.new()
+	thread.start(_blit_thread)
+
+func _process(_delta):
+	#_deferred_sync(_delta)
+	pass
 	
 func _physics_process(_delta):
 	if Input.is_action_just_released("ui_accept"):
 		exit()
-	if socket_is_connected:
-		#call_deferred("_deferred_sync")
-		if is_syncing:
-			print("skipping frame, called while processing")
-			return
-		call_deferred("_send_blit")
-		call_deferred("_get_frame_buffer")
+	_deferred_sync(_delta)
+	##call_deferred("_deferred_sync", _delta)
 
-func _deferred_sync():
+func _deferred_sync(_delta):
+	var sync_time = Time.get_ticks_usec()
 	if is_syncing:
 		print("skipping frame, called while processing")
 		return
-	
-	var sync_time = Time.get_ticks_usec()
 	is_syncing = true
-	_send_blit()
+	if socket_is_connected and !DEBUG_BLIT_VIA_THREAD:
+		print("_delta:"+str(_delta)+ ":"+str(frame))
+		var blit_time = Time.get_ticks_usec()
+		_send_blit()
+		var blit_total = Time.get_ticks_usec()-blit_time
+		print("blit_time:"+str(blit_total)+ ":"+str(frame))
+		if blit_total/1000000.0 > _delta:
+			print("blit exceeded frame"+str(frame)+" by ms "+str((blit_total/1000.0 - _delta*1000.0)))
+		
+	var frame_buffer_time = Time.get_ticks_usec()
 	_get_frame_buffer()
+	print("get_frame_buffer:"+str(Time.get_ticks_usec()-frame_buffer_time)+ ":"+str(frame))
+	print("sync_time:"+str(Time.get_ticks_usec()-sync_time)+ ":"+str(frame))
 	is_syncing = false
-	var total_sync_time = Time.get_ticks_usec()-sync_time
-	if total_sync_time > 16000:
-		print(str(total_sync_time)+" high total sync time")
 
 func _get_frame_buffer():
 	#var frame_buffer_time = Time.get_ticks_usec()
@@ -68,11 +91,18 @@ func _get_frame_buffer():
 
 func _initialize_socket():
 	socket = PacketPeerUDP.new()
+	# socket.set_blocking_mode(true)
 	socket.connect_to_host(MiSTer_ip, MiSTer_port)
 	if socket.is_socket_connected:
 		print("socket initialized")
+		#delay_timer.start(.5)
+		#await delay_timer.timeout
 		cmd_init()
+		#delay_timer.start(.5)
+		#await delay_timer.timeout
 		cmd_switchres()
+		#delay_timer.start(.5)
+		#await delay_timer.timeout
 		socket_is_connected = true
 	else:
 		print('Error connecting to GroovyMister, removing GroovyMisterGodot')
@@ -133,9 +163,9 @@ func _cmd_blit(frame_buffer: PackedByteArray):
 	buffer.set(7, 0) # lz4: blockSize & 0xff
 	buffer.set(8, 0) # lz4: blockSize >> 8
 	_socket_send(buffer)
-	#print("cmd_blit_vsync ran")
+	print("cmd_blit_vsync ran" + str(frame))
 	_send_mtu(frame_buffer)
-	#print("cmd_blit ran")
+	print("cmd_blit ran" + str(frame))
 
 func _send_mtu(frame_buffer: PackedByteArray):
 	var bytes_to_send = frame_buffer.size()
@@ -154,11 +184,13 @@ func _socket_send(buffer: PackedByteArray, byte_length: int = 0):
 	if DEBUG_NO_SEND:
 		return
 	#call_deferred("_put_deferred",buffer)
-	socket.put_packet(buffer)
+	if socket_is_connected:
+		socket.put_packet(buffer)
 	
 
 func _put_deferred(buffer:PackedByteArray):
-	socket.put_packet(buffer)
+	if socket_is_connected:
+		socket.put_packet(buffer)
 
 func _send_blit():
 		#var blit_time_no_thread = Time.get_ticks_usec()
@@ -175,10 +207,50 @@ func _send_blit():
 		_cmd_blit(data)
 		#print(str(Time.get_ticks_usec()-blit_time_no_thread)+" blit_time_no_thread time")
 
+func _blit_thread():
+	var tick_rate_usec: int = floor(1000000.0/(fps*2))
+	print("tick rate "+str(tick_rate_usec))
+	var next_tick: int = Time.get_ticks_usec() + tick_rate_usec
+	print("next_tick "+str(next_tick))
+	while !exit_thread:
+		var curr_time: int = Time.get_ticks_usec()
+		#if curr_time < next_tick or !socket_is_connected:
+		if !socket_is_connected:
+			continue
+		#next_tick = curr_time + tick_rate_usec
+		#print("next_tick "+str(next_tick))
+		
+		#var blit_time_no_thread = Time.get_ticks_usec()
+		var data: PackedByteArray
+		mutex.lock()
+		if frame_buffers.size() < 1:
+			mutex.unlock()
+			print("bouncing")
+			continue
+		if frame_buffers.size() > 1:
+			#print(frame_buffers.size())
+			data = frame_buffers[frame_buffers.size()-1]
+			frame_buffers.clear()
+			frame_buffers.push_front(data)
+		else:
+			data = frame_buffers[0]
+		mutex.unlock()
+		#print('ran thread at '+str(curr_time)+" next tick "+str(next_tick))
+		#call_deferred("_cmd_blit",data)
+		_cmd_blit(data)
+		var end_time = Time.get_ticks_usec()
+		if end_time - curr_time > tick_rate_usec:
+			print("Blit time extended tick by "+str(end_time - curr_time - tick_rate_usec))
+		#print(str(Time.get_ticks_usec()-blit_time_no_thread)+" blit_time_no_thread time")
+
 func _exit_tree():
 	exit()
 
-func exit():	
+func exit():
+	socket_is_connected = false
+	exit_thread = true
+	if thread.is_started():
+		thread.wait_to_finish()
 	if socket and socket.is_socket_connected():
 		cmd_close()
 		socket.close()
